@@ -105,12 +105,20 @@ let register_once () =
       | [] -> ("127.0.0.1", 80)
     in
     try
-      let addr =
-        try Unix.inet_addr_of_string host
-        with _ -> (Unix.gethostbyname host).Unix.h_addr_list.(0)
+      let rec connect_first = function
+        | [] -> failwith "no address for carolina url"
+        | ai :: rest -> (
+            try
+              let fd = Unix.socket ai.Unix.ai_family ai.Unix.ai_socktype 0 in
+              Unix.connect fd ai.Unix.ai_addr;
+              fd
+            with _ -> connect_first rest)
       in
-      let fd = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
-      Unix.connect fd (Unix.ADDR_INET (addr, p));
+      let fd =
+        connect_first
+          (Unix.getaddrinfo host (string_of_int p)
+             [ Unix.AI_SOCKTYPE Unix.SOCK_STREAM ])
+      in
       let req =
         Printf.sprintf
           "POST /internal/api-endpoints/register HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s"
