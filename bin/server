@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export FSTAR_HOME="${FSTAR_HOME:-$HOME/.local/opt/fstar}"
+if [[ -x "$HOME/.local/bin/opam" ]]; then
+  eval "$("$HOME/.local/bin/opam" env --switch=5.3.0 2>/dev/null || true)"
+fi
+if [[ -x "$ROOT/_build/default/ocaml/server.exe" ]]; then
+  exec "$ROOT/_build/default/ocaml/server.exe"
+fi
+if command -v dune >/dev/null 2>&1; then
+  cd "$ROOT"
+  exec dune exec ./ocaml/server.exe
+fi
+echo "carolina-fstar server.exe not built; run make build" >&2
+exit 1

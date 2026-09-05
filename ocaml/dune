@@ -1,0 +1,28 @@
+(library
+ (name carolina_handler)
+ (wrapped false)
+ (modules
+  Prims
+  FStar_UInt32
+  FStar_Char
+  FStar_String
+  FStar_List_Tot_Base
+  Carolina)
+ (libraries batteries zarith stdint)
+ (flags :standard -w -6-8-27-32-33-37-39)
+ (preprocess
+  (pps ppx_deriving.show ppx_deriving_yojson)))
+
+(executable
+ (name test)
+ (modules Test)
+ (libraries carolina_handler zarith unix))
+
+(executable
+ (name server)
+ (modules Catalog Server)
+ (foreign_stubs
+  (language c)
+  (names pq_stubs))
+ (link_flags :standard -cclib -lpq)
+ (libraries carolina_handler unix zarith))

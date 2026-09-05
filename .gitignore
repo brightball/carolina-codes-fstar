@@ -1,0 +1,6 @@
+/_build/
+/ocaml-output/
+/ocaml/Carolina.ml
+/ocaml/Prims.ml
+/ocaml/FStar_*.ml
+/.cache/
