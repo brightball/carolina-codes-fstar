@@ -14,11 +14,12 @@ COPY --chown=opam:opam ocaml ./ocaml
 COPY --chown=opam:opam dune-project Makefile ./
 ENV FSTAR_HOME=/home/opam/src/fstar
 ENV PATH="/home/opam/src/fstar/bin:${PATH}"
+ENV C_INCLUDE_PATH=/usr/include/postgresql
 RUN eval $(opam env) && make build
 
 FROM debian:bookworm-slim
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libpq5 ca-certificates \
+ && apt-get install -y --no-install-recommends libpq5 libgmp10 ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /home/opam/src/_build/default/ocaml/server.exe /usr/local/bin/carolina-codes-fstar
 ENV PORT=8080

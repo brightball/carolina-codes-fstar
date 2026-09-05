@@ -17,11 +17,13 @@ runtime:
 	cp $(APP_ML)/FStar_List_Tot_Base.ml ocaml/FStar_List_Tot_Base.ml
 	cp $(APP_ML)/ints/FStar_UInt32.ml ocaml/FStar_UInt32.ml
 
+OPAM_ENV = opam env --switch=5.3.0 2>/dev/null || opam env
+
 build: extract runtime
-	eval $$(opam env --switch=5.3.0) && dune build
+	eval $$($(OPAM_ENV)) && dune build
 
 test: build
-	eval $$(opam env --switch=5.3.0) && dune exec ./ocaml/test.exe
+	eval $$($(OPAM_ENV)) && dune exec ./ocaml/test.exe
 
 run: build
-	eval $$(opam env --switch=5.3.0) && dune exec ./ocaml/server.exe
+	eval $$($(OPAM_ENV)) && dune exec ./ocaml/server.exe

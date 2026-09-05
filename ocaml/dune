@@ -23,6 +23,7 @@
  (modules Catalog Server)
  (foreign_stubs
   (language c)
-  (names pq_stubs))
+  (names pq_stubs)
+  (flags -I/usr/include/postgresql))
  (link_flags :standard -cclib -lpq)
  (libraries carolina_handler unix zarith))
