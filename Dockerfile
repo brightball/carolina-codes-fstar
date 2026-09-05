@@ -1,7 +1,7 @@
 FROM ocaml/opam:debian-12-ocaml-5.3 AS build
 USER root
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libpq-dev ca-certificates curl \
+ && apt-get install -y --no-install-recommends libpq-dev libgmp-dev pkg-config ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
 USER opam
 WORKDIR /home/opam/src
