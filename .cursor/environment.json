@@ -1,0 +1,14 @@
+{
+  "name": "carolina-codes-fstar",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "."
+  },
+  "install": "eval $(opam env) && make extract",
+  "ports": [
+    {
+      "name": "api",
+      "port": 4026
+    }
+  ]
+}
