@@ -1,0 +1,11 @@
+title = "carolina-codes-fstar"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "build and F* extraction artifacts"
+paths = [
+  '''(^|/)_build/''',
+  '''(^|/)ocaml-output/''',
+]

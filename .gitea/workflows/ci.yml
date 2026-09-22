@@ -1,0 +1,189 @@
+# Prepare the workspace and tools once, then run each quality check
+# as its own job. Not a single combined job.
+#
+# act_runner starts a new container per job, so prepare uploads a
+# tarball via the Gitea Actions artifact API (curl, no Node). Check
+# jobs restore that payload and run only their make target.
+# Do not use actions/checkout or actions/upload-artifact. Clone
+# GITHUB_SHA over HTTPS with the job token. Do not git init or set
+# init.defaultBranch here.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GITHUB_TOKEN: ${{ github.token }}
+
+# Node-free restore of the prepare tarball. Check jobs must not
+# re-run workspace setup or shared installs; YAML anchors that still
+# execute that setup in every check job are not a substitute.
+x-ci-restore: &ci-restore |
+  set -eu
+  cd "${GITHUB_WORKSPACE:?}"
+  token="${ACTIONS_RUNTIME_TOKEN:-${GITHUB_TOKEN:-${GITEA_TOKEN:-}}}"
+  if [ -z "$token" ]; then echo "missing token for artifact download" >&2; exit 1; fi
+  runtime="${ACTIONS_RUNTIME_URL:-${GITHUB_SERVER_URL:?}/api/actions_pipeline/}"
+  case "$runtime" in
+    */) ;;
+    *) runtime="${runtime}/" ;;
+  esac
+  run_id="${GITHUB_RUN_ID:?}"
+  name="ci-env"
+  auth="Authorization: Bearer ${token}"
+  json_str() {
+    tr -d '\n' < "$1" | sed -n 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
+  }
+  abs_url() {
+    u="$1"
+    case "$u" in
+      http://*|https://*) printf '%s\n' "$u" ;;
+      /*) printf '%s\n' "${GITHUB_SERVER_URL}${u}" ;;
+      *) printf '%s\n' "${runtime}${u}" ;;
+    esac
+  }
+  curl -fsSL -H "$auth" -o /tmp/artifact-list.json \
+    "${runtime}_apis/pipelines/workflows/${run_id}/artifacts?api-version=6.0-preview"
+  container_url=$(abs_url "$(json_str /tmp/artifact-list.json fileContainerResourceUrl)")
+  if [ -z "$container_url" ]; then echo "prepare artifact list missing fileContainerResourceUrl" >&2; cat /tmp/artifact-list.json >&2; exit 1; fi
+  curl -fsSL -H "$auth" -o /tmp/artifact-files.json \
+    "${container_url}?itemPath=${name}"
+  content_location=$(abs_url "$(json_str /tmp/artifact-files.json contentLocation)")
+  if [ -z "$content_location" ]; then echo "prepare artifact missing contentLocation" >&2; cat /tmp/artifact-files.json >&2; exit 1; fi
+  curl -fsSL -H "$auth" -o /tmp/ci-env.tar.gz \
+    "${content_location}?itemPath=${name}%2Fci-env.tar.gz"
+  export CI_ENV_TAR=/tmp/ci-env.tar.gz
+  mkdir -p /tmp/ci-payload
+  tar -xzf "$CI_ENV_TAR" -C /tmp/ci-payload
+  test -f /tmp/ci-payload/work/scripts/ci-restore.sh
+  sh /tmp/ci-payload/work/scripts/ci-restore.sh
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/ocaml/opam:debian-12-ocaml-5.3
+      options: --user root
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - run: |
+          rm -f /etc/apt/apt.conf.d/docker-clean
+          apt-get update -qq
+          apt-get install -y --no-install-recommends \
+            git ca-certificates curl make tar gzip \
+            libpq-dev libgmp-dev pkg-config \
+            python3 python3-pip python3-venv openssl
+      - run: |
+          token="${GITHUB_TOKEN:-${GITEA_TOKEN:-}}"
+          if [ -z "$token" ]; then echo "missing job token for git fetch" >&2; exit 1; fi
+          host="${GITHUB_SERVER_URL#https://}"
+          host="${host#http://}"
+          git clone --depth 1 --no-checkout "https://x-access-token:${token}@${host}/${GITHUB_REPOSITORY}" .
+          git fetch --depth 1 origin "${GITHUB_SHA}"
+          git checkout --force FETCH_HEAD
+      - run: |
+          set -eu
+          mkdir -p /opt/ci/bin
+          curl -fsSL -o /tmp/fstar.tar.gz \
+            https://github.com/FStarLang/FStar/releases/download/v2026.08.30/fstar-v2026.08.30-Linux-x86_64.tar.gz
+          tar -xzf /tmp/fstar.tar.gz -C /opt/ci
+          test -x /opt/ci/fstar/bin/fstar.exe
+          curl -fsSL -o /opt/ci/bin/osv-scanner \
+            https://github.com/google/osv-scanner/releases/download/v2.6.0/osv-scanner_linux_amd64
+          chmod +x /opt/ci/bin/osv-scanner
+          curl -fsSL -o /tmp/gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /opt/ci/bin gitleaks
+          chmod +x /opt/ci/bin/gitleaks
+          python3 -m venv /opt/ci/semgrep
+          /opt/ci/semgrep/bin/pip install --upgrade pip
+          /opt/ci/semgrep/bin/pip install 'semgrep==1.177.0'
+          chown -R opam:opam /opt/ci /home/opam
+          su -s /bin/bash opam -c '
+            set -euo pipefail
+            eval $(opam env)
+            opam install -y dune ocamlfind batteries zarith yojson ppx_deriving ppx_deriving_yojson stdint ocamlformat.0.27.0
+          '
+      - run: |
+          set -eu
+          CI_PACK_DEBS=1 CI_PACK_OPAM=1 sh scripts/ci-pack.sh /tmp/ci-env.tar.gz
+          sh scripts/ci-artifact.sh upload ci-env /tmp/ci-env.tar.gz
+
+  test:
+    needs: prepare
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/ocaml/opam:debian-12-ocaml-5.3
+      options: --user root
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - run: *ci-restore
+      - run: |
+          su -s /bin/bash opam -c '
+            set -euo pipefail
+            eval $(opam env)
+            export FSTAR_HOME=/opt/ci/fstar
+            export PATH="/opt/ci/bin:/opt/ci/semgrep/bin:$FSTAR_HOME/bin:$PATH"
+            make test
+          '
+
+  sast:
+    needs: prepare
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/ocaml/opam:debian-12-ocaml-5.3
+      options: --user root
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - run: *ci-restore
+      - run: make sast
+
+  vuln:
+    needs: prepare
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/ocaml/opam:debian-12-ocaml-5.3
+      options: --user root
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - run: *ci-restore
+      - run: make vuln
+
+  secrets:
+    needs: prepare
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/ocaml/opam:debian-12-ocaml-5.3
+      options: --user root
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - run: *ci-restore
+      - run: make secrets
+
+  fmt:
+    needs: prepare
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/ocaml/opam:debian-12-ocaml-5.3
+      options: --user root
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - run: *ci-restore
+      - run: |
+          su -s /bin/bash opam -c '
+            set -euo pipefail
+            eval $(opam env)
+            export PATH="/home/opam/.opam/5.3.0/bin:/opt/ci/bin:$PATH"
+            make fmt-check
+          '

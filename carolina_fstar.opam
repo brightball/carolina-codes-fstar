@@ -1,0 +1,16 @@
+opam-version: "2.0"
+name: "carolina-fstar"
+version: "0.2.0"
+synopsis: "Read-only v1 polyglot API extracted from F* to OCaml Unix"
+depends: [
+  "ocaml" {>= "5.3.0"}
+  "dune" {>= "3.8"}
+  "batteries"
+  "zarith"
+  "yojson"
+  "ppx_deriving"
+  "ppx_deriving_yojson"
+  "stdint"
+  "ocamlfind"
+]
+depopts: ["ocamlformat"]

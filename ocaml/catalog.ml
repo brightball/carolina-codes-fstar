@@ -3,6 +3,7 @@
 type conn
 
 external pq_connect : string -> conn = "carolina_pq_connect"
+
 external pq_exec : conn -> string -> string array -> (string * string) list list
   = "carolina_pq_exec"
 
@@ -13,8 +14,7 @@ let live : conn option ref = ref None
 
 let has_ssl s =
   let rec aux i =
-    i + 8 <= String.length s
-    && (String.sub s i 8 = "sslmode=" || aux (i + 1))
+    i + 8 <= String.length s && (String.sub s i 8 = "sslmode=" || aux (i + 1))
   in
   aux 0
 

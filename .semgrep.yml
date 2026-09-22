@@ -1,0 +1,58 @@
+# Security rules for shipped F* / handwritten OCaml / libpq stubs.
+# Generated F* extraction and _build/ are excluded via .semgrepignore.
+rules:
+  - id: c-dangerous-strcpy
+    languages: [c]
+    severity: ERROR
+    message: strcpy is unbounded; use a size-limited copy
+    pattern: strcpy(...)
+
+  - id: c-dangerous-gets
+    languages: [c]
+    severity: ERROR
+    message: gets() is unbounded and must not be used
+    pattern: gets(...)
+
+  - id: c-dangerous-sprintf
+    languages: [c]
+    severity: ERROR
+    message: sprintf is unbounded; use snprintf
+    pattern: sprintf(...)
+
+  - id: c-system-call
+    languages: [c]
+    severity: ERROR
+    message: system() can enable command injection
+    pattern: system(...)
+
+  - id: ocaml-sys-command
+    languages: [ocaml]
+    severity: ERROR
+    message: Sys.command can enable command injection
+    pattern: Sys.command(...)
+
+  - id: ocaml-unix-system
+    languages: [ocaml]
+    severity: ERROR
+    message: Unix.system can enable command injection
+    pattern: Unix.system(...)
+
+  - id: ocaml-marshal-untrusted
+    languages: [ocaml]
+    severity: ERROR
+    message: Marshal deserialization of untrusted data is a memory-safety hazard
+    pattern-either:
+      - pattern: Marshal.from_string(...)
+      - pattern: Marshal.from_channel(...)
+      - pattern: Marshal.from_bytes(...)
+
+  - id: fstar-shell-out
+    languages: [generic]
+    severity: ERROR
+    message: Shelling out from F* handler code
+    paths:
+      include:
+        - "*.fst"
+    pattern-either:
+      - pattern: Sys.command
+      - pattern: Unix.system

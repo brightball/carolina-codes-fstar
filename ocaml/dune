@@ -16,14 +16,16 @@
 (executable
  (name test)
  (modules Test)
+ (flags :standard -warn-error +A)
  (libraries carolina_handler zarith unix))
 
 (executable
  (name server)
  (modules Catalog Server)
+ (flags :standard -warn-error +A)
  (foreign_stubs
   (language c)
   (names pq_stubs)
-  (flags -I/usr/include/postgresql))
+  (flags -I/usr/include/postgresql -O2 -Wall -Wextra -Werror))
  (link_flags :standard -cclib -lpq)
- (libraries carolina_handler unix zarith))
+ (libraries threads carolina_handler unix zarith))

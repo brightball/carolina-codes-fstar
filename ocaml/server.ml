@@ -3,8 +3,7 @@
 let env name default =
   match Sys.getenv_opt name with Some s when s <> "" -> s | _ -> default
 
-let listen_port () =
-  try int_of_string (env "PORT" "4026") with _ -> 4026
+let listen_port () = try int_of_string (env "PORT" "4026") with _ -> 4026
 
 let rec read_request fd buf pos =
   if pos >= Bytes.length buf then failwith "request too large";
@@ -21,9 +20,7 @@ and has s sub =
   m = 0 || aux 0
 
 let first_line s =
-  match String.split_on_char '\n' s with
-  | h :: _ -> String.trim h
-  | [] -> ""
+  match String.split_on_char '\n' s with h :: _ -> String.trim h | [] -> ""
 
 let parse_target line =
   match String.split_on_char ' ' line with
@@ -60,12 +57,17 @@ let respond fd status body =
   let reason = if status = 404 then "Not Found" else "OK" in
   let hdr =
     Printf.sprintf
-      "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n"
+      "HTTP/1.1 %d %s\r\n\
+       Content-Type: application/json\r\n\
+       Content-Length: %d\r\n\
+       Connection: close\r\n\
+       \r\n"
       status reason (String.length body)
   in
   write_all fd (hdr ^ body)
 
 let handle_client fd cat =
+  (try Unix.setsockopt fd Unix.TCP_NODELAY true with _ -> ());
   let buf = Bytes.create 8192 in
   let n = read_request fd buf 0 in
   let raw = Bytes.sub_string buf 0 n in
@@ -76,71 +78,85 @@ let handle_client fd cat =
   respond fd (Z.to_int st) body
 
 let register_once () =
-  let url = env "CAROLINA_URL" "" in
-  let token = env "POLYGLOT_REGISTER_TOKEN" "" in
-  if url = "" || token = "" then ()
-  else
-    let port = env "PORT" "4026" in
-    let base = env "PUBLIC_BASE_URL" ("http://127.0.0.1:" ^ port) in
-    let body =
-      Carolina.identity_json "F* 2026.08.30"
-      |> fun id ->
-      (* identity_json is a full object; splice base_url before the last } *)
-      let n = String.length id in
-      String.sub id 0 (n - 1)
-      ^ ",\"base_url\":\"" ^ String.escaped base ^ "\"}"
-    in
-    let host, p =
-      let rest =
-        if String.length url >= 7 && String.sub url 0 7 = "http://" then
-          String.sub url 7 (String.length url - 7)
-        else url
+  (* Any failure here is non-fatal. Callers run this off the accept path:
+     Unix.read blocks forever when the CMS accepts and sends nothing. *)
+  try
+    let url = env "CAROLINA_URL" "" in
+    let token = env "POLYGLOT_REGISTER_TOKEN" "" in
+    if url = "" || token = "" then ()
+    else
+      let port = env "PORT" "4026" in
+      let base = env "PUBLIC_BASE_URL" ("http://127.0.0.1:" ^ port) in
+      let body =
+        Carolina.identity_json "F* 2026.08.30" |> fun id ->
+        (* identity_json is a full object; splice base_url before the last } *)
+        let n = String.length id in
+        String.sub id 0 (n - 1)
+        ^ ",\"base_url\":\"" ^ String.escaped base ^ "\"}"
       in
-      let rest =
-        match String.split_on_char '/' rest with h :: _ -> h | [] -> rest
+      let host, p =
+        let rest =
+          if String.length url >= 7 && String.sub url 0 7 = "http://" then
+            String.sub url 7 (String.length url - 7)
+          else url
+        in
+        let rest =
+          match String.split_on_char '/' rest with h :: _ -> h | [] -> rest
+        in
+        match String.split_on_char ':' rest with
+        | h :: po :: _ -> (h, int_of_string po)
+        | h :: _ -> (h, 80)
+        | [] -> ("127.0.0.1", 80)
       in
-      match String.split_on_char ':' rest with
-      | h :: po :: _ -> (h, int_of_string po)
-      | h :: _ -> (h, 80)
-      | [] -> ("127.0.0.1", 80)
-    in
-    try
       let rec connect_first = function
         | [] -> failwith "no address for carolina url"
         | ai :: rest -> (
+            let fd = Unix.socket ai.Unix.ai_family ai.Unix.ai_socktype 0 in
             try
-              let fd = Unix.socket ai.Unix.ai_family ai.Unix.ai_socktype 0 in
+              (try Unix.setsockopt fd Unix.TCP_NODELAY true with _ -> ());
               Unix.connect fd ai.Unix.ai_addr;
               fd
-            with _ -> connect_first rest)
+            with _ ->
+              (try Unix.close fd with _ -> ());
+              connect_first rest)
       in
       let fd =
         connect_first
           (Unix.getaddrinfo host (string_of_int p)
              [ Unix.AI_SOCKTYPE Unix.SOCK_STREAM ])
       in
-      let req =
-        Printf.sprintf
-          "POST /internal/api-endpoints/register HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s"
-          host token (String.length body) body
-      in
-      write_all fd req;
-      let b = Bytes.create 512 in
-      let n = Unix.read fd b 0 512 in
-      let resp = Bytes.sub_string b 0 n in
-      let code =
-        try String.sub (first_line resp) 9 3 with _ -> "?"
-      in
-      Printf.eprintf "registered with elixir: %s\n%!" code;
-      Unix.close fd
-    with e -> Printf.eprintf "register: failed %s\n%!" (Printexc.to_string e)
+      Fun.protect
+        ~finally:(fun () -> try Unix.close fd with _ -> ())
+        (fun () ->
+          let req =
+            Printf.sprintf
+              "POST /internal/api-endpoints/register HTTP/1.1\r\n\
+               Host: %s\r\n\
+               Authorization: Bearer %s\r\n\
+               Content-Type: application/json\r\n\
+               Content-Length: %d\r\n\
+               Connection: close\r\n\
+               \r\n\
+               %s"
+              host token (String.length body) body
+          in
+          write_all fd req;
+          let b = Bytes.create 512 in
+          let n = Unix.read fd b 0 512 in
+          let resp = Bytes.sub_string b 0 n in
+          let code = try String.sub (first_line resp) 9 3 with _ -> "?" in
+          Printf.eprintf "registered with elixir: %s\n%!" code)
+  with e -> Printf.eprintf "register: failed %s\n%!" (Printexc.to_string e)
+
+(* Listen is already up. A stuck registry read must not block accept. *)
+let spawn_register () = ignore (Thread.create (fun () -> register_once ()) ())
 
 let dual_stack_listen port =
   let fd = Unix.socket Unix.PF_INET6 Unix.SOCK_STREAM 0 in
   Unix.setsockopt fd Unix.SO_REUSEADDR true;
   (try Unix.setsockopt fd Unix.IPV6_ONLY false with _ -> ());
   Unix.bind fd (Unix.ADDR_INET (Unix.inet6_addr_any, port));
-  Unix.listen fd 16;
+  Unix.listen fd 128;
   fd
 
 let rec accept_loop fd cat =
@@ -152,8 +168,8 @@ let rec accept_loop fd cat =
 
 let () =
   let cat sql args = Catalog.query sql args in
-  register_once ();
   let port = listen_port () in
   let fd = dual_stack_listen port in
   Printf.printf "carolina-codes-fstar listening on [::]:%d\n%!" port;
+  spawn_register ();
   accept_loop fd cat

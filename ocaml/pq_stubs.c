@@ -3,6 +3,7 @@
 #include <caml/memory.h>
 #include <caml/mlvalues.h>
 #include <libpq-fe.h>
+#include <stdint.h>
 #include <string.h>
 
 CAMLprim value carolina_pq_connect(value vdsn) {
@@ -14,13 +15,13 @@ CAMLprim value carolina_pq_connect(value vdsn) {
     PQfinish(c);
     caml_failwith(buf);
   }
-  CAMLreturn(caml_copy_nativeint((intnat)c));
+  CAMLreturn(caml_copy_nativeint((intnat)(intptr_t)c));
 }
 
 CAMLprim value carolina_pq_exec(value vconn, value vsql, value vargs) {
   CAMLparam3(vconn, vsql, vargs);
   CAMLlocal4(rows, row, pair, tmp);
-  PGconn *c = (PGconn *)Nativeint_val(vconn);
+  PGconn *c = (PGconn *)(intptr_t)Nativeint_val(vconn);
   int n = Wosize_val(vargs);
   const char *vals[32];
   int i, r, f, nt, nf;

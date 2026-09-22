@@ -1,0 +1,12 @@
+# The opam package "ocaml" is the compiler pin (5.3.0), not a library we can
+# bump without leaving the F* image. These advisories have no 5.3 fix.
+# OSEC-2026-01 / OSEC-2026-18 are Marshal deserializers. This API does not
+# unmarshal, and Semgrep rejects Marshal.from_* in shipped code.
+# OSEC-2026-05 is Windows Filename.quote_command. The server runs on Linux.
+[[IgnoredVulns]]
+id = "OSEC-2026-01"
+reason = "Marshal is not used (alias OSEC-2026-18 included); no OCaml 5.3 fix"
+
+[[IgnoredVulns]]
+id = "OSEC-2026-05"
+reason = "Windows-only Filename.quote_command; this service runs on Linux; no OCaml 5.3 fix"

@@ -15,7 +15,7 @@ COPY --chown=opam:opam dune-project Makefile ./
 ENV FSTAR_HOME=/home/opam/src/fstar
 ENV PATH="/home/opam/src/fstar/bin:${PATH}"
 ENV C_INCLUDE_PATH=/usr/include/postgresql
-RUN eval $(opam env) && make build
+RUN eval $(opam env) && make release
 
 FROM debian:bookworm-slim
 RUN apt-get update \
