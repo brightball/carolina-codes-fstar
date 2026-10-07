@@ -17,15 +17,23 @@
  (name test)
  (modules Test)
  (flags :standard -warn-error +A)
- (libraries carolina_handler zarith unix))
+ (link_flags :standard -cclib -lpq)
+ (libraries threads carolina_server carolina_handler unix zarith))
 
-(executable
- (name server)
- (modules Catalog Server)
+(library
+ (name carolina_server)
+ (wrapped false)
+ (modules Catalog Serve)
  (flags :standard -warn-error +A)
  (foreign_stubs
   (language c)
   (names pq_stubs)
   (flags -I/usr/include/postgresql -O2 -Wall -Wextra -Werror))
- (link_flags :standard -cclib -lpq)
+ (c_library_flags -lpq)
  (libraries threads carolina_handler unix zarith))
+
+(executable
+ (name server)
+ (modules Server)
+ (flags :standard -warn-error +A)
+ (libraries carolina_server))

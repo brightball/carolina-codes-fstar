@@ -2,20 +2,50 @@
 #include <caml/fail.h>
 #include <caml/memory.h>
 #include <caml/mlvalues.h>
+#include <caml/threads.h>
 #include <libpq-fe.h>
 #include <stdint.h>
 #include <string.h>
 
+/* PQconnectdb and PQexec block. Releasing the runtime lock lets another
+   thread answer GET /health while a catalog call is stuck in libpq. */
+
 CAMLprim value carolina_pq_connect(value vdsn) {
   CAMLparam1(vdsn);
-  PGconn *c = PQconnectdb(String_val(vdsn));
-  if (PQstatus(c) != CONNECTION_OK) {
-    char buf[1024];
-    snprintf(buf, sizeof buf, "%s", PQerrorMessage(c));
+  char *dsn = caml_stat_strdup(String_val(vdsn));
+  PGconn *c;
+  int status;
+  char err[1024];
+  err[0] = 0;
+  caml_release_runtime_system();
+  c = PQconnectdb(dsn);
+  status = PQstatus(c);
+  if (status != CONNECTION_OK) {
+    const char *msg = PQerrorMessage(c);
+    snprintf(err, sizeof err, "%s", (msg && msg[0]) ? msg : "connect failed");
     PQfinish(c);
-    caml_failwith(buf);
+    c = NULL;
   }
+  caml_acquire_runtime_system();
+  caml_stat_free(dsn);
+  if (c == NULL)
+    caml_failwith(err[0] ? err : "connect failed");
   CAMLreturn(caml_copy_nativeint((intnat)(intptr_t)c));
+}
+
+CAMLprim value carolina_pq_ok(value vconn) {
+  CAMLparam1(vconn);
+  PGconn *c = (PGconn *)(intptr_t)Nativeint_val(vconn);
+  CAMLreturn(Val_bool(PQstatus(c) == CONNECTION_OK));
+}
+
+CAMLprim value carolina_pq_finish(value vconn) {
+  CAMLparam1(vconn);
+  PGconn *c = (PGconn *)(intptr_t)Nativeint_val(vconn);
+  caml_release_runtime_system();
+  PQfinish(c);
+  caml_acquire_runtime_system();
+  CAMLreturn(Val_unit);
 }
 
 CAMLprim value carolina_pq_exec(value vconn, value vsql, value vargs) {
@@ -24,24 +54,42 @@ CAMLprim value carolina_pq_exec(value vconn, value vsql, value vargs) {
   PGconn *c = (PGconn *)(intptr_t)Nativeint_val(vconn);
   int n = Wosize_val(vargs);
   const char *vals[32];
-  int i, r, f, nt, nf;
+  char *stored[32];
+  char *sql;
+  char err[1024];
+  int i, r, f, nt, nf, failed;
   PGresult *res;
   if (n > 32)
     caml_failwith("too many params");
-  for (i = 0; i < n; i++)
-    vals[i] = String_val(Field(vargs, i));
+  sql = caml_stat_strdup(String_val(vsql));
+  for (i = 0; i < n; i++) {
+    stored[i] = caml_stat_strdup(String_val(Field(vargs, i)));
+    vals[i] = stored[i];
+  }
+  err[0] = 0;
+  failed = 0;
+  caml_release_runtime_system();
   if (n == 0)
-    res = PQexec(c, String_val(vsql));
+    res = PQexec(c, sql);
   else
-    res = PQexecParams(c, String_val(vsql), n, NULL, vals, NULL, NULL, 0);
+    res = PQexecParams(c, sql, n, NULL, vals, NULL, NULL, 0);
   if (!res || (PQresultStatus(res) != PGRES_TUPLES_OK &&
                PQresultStatus(res) != PGRES_COMMAND_OK)) {
-    char buf[1024];
-    snprintf(buf, sizeof buf, "%s", res ? PQresultErrorMessage(res) : "null result");
+    const char *msg = res ? PQresultErrorMessage(res) : PQerrorMessage(c);
+    if (!msg || !msg[0])
+      msg = "null result";
+    snprintf(err, sizeof err, "%s", msg);
     if (res)
       PQclear(res);
-    caml_failwith(buf);
+    res = NULL;
+    failed = 1;
   }
+  caml_acquire_runtime_system();
+  caml_stat_free(sql);
+  for (i = 0; i < n; i++)
+    caml_stat_free(stored[i]);
+  if (failed)
+    caml_failwith(err);
   nt = PQntuples(res);
   nf = PQnfields(res);
   rows = Val_emptylist;

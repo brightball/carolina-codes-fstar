@@ -6,10 +6,10 @@ export PATH := $(HOME)/.local/bin:$(HOME)/.opam/5.3.0/bin:$(HOME)/.local/share/m
 OPAM_ENV = opam env --switch=5.3.0 2>/dev/null || opam env
 
 # Handwritten OCaml only. Generated F* extraction is not a formatting surface.
-HANDWRITTEN_ML := ocaml/catalog.ml ocaml/server.ml ocaml/test.ml
+HANDWRITTEN_ML := ocaml/catalog.ml ocaml/catalog.mli ocaml/serve.ml ocaml/serve.mli ocaml/server.ml ocaml/test.ml
 
 # Semgrep CE on shipped F* / handwritten OCaml / libpq stubs (not _build/).
-SAST_PATHS := src ocaml/catalog.ml ocaml/server.ml ocaml/test.ml ocaml/pq_stubs.c
+SAST_PATHS := src ocaml/catalog.ml ocaml/catalog.mli ocaml/serve.ml ocaml/serve.mli ocaml/server.ml ocaml/test.ml ocaml/pq_stubs.c
 
 .PHONY: extract runtime build release test run fmt fmt-check sast vuln audit secrets check ci hooks
 

@@ -16,7 +16,7 @@ make hooks       # install local pre-commit hooks
 
 Pre-commit runs the same five checks (`local tests`, `static security scanner`, `3rd-party dependency scanner`, `gitleaks`, `ocamlformat`). Install once with `make hooks` (needs `pre-commit` on PATH). Emergency skip: `SKIP=local-tests,sast,vuln,secrets,fmt git commit`.
 
-`ocamlformat` is check-only on handwritten `ocaml/catalog.ml`, `ocaml/server.ml`, and `ocaml/test.ml`. Generated F* extraction (`Carolina.ml`, `Prims.ml`, `FStar_*.ml`) is not a formatting surface.
+`ocamlformat` is check-only on handwritten `ocaml/catalog.ml`, `ocaml/serve.ml`, `ocaml/server.ml`, and `ocaml/test.ml` (and their `.mli` files). Generated F* extraction (`Carolina.ml`, `Prims.ml`, `FStar_*.ml`) is not a formatting surface.
 
 ```bash
 DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/carolina_dev \
@@ -27,6 +27,6 @@ PORT=4026 \
 ./bin/server
 ```
 
-`GET /` reports `language: "F*"` and `framework: "OCaml Unix"`. `GET /health` returns `{"status":"ok"}` without touching Postgres. The process binds its listen socket before CMS registration, so a registry that accepts the TCP connection and sends nothing does not delay `/health` or `/`. Postgres is not contacted until a catalog route runs. Listen port is **4026**.
+`GET /` reports `language: "F*"` and `framework: "OCaml Unix"`. `GET /health` returns `{"status":"ok"}` without touching Postgres, including while a catalog query is blocked in the database. A client that never finishes its request headers cannot hold the accept loop. If a database connection fails or is closed, that request still gets a JSON error and the next catalog query opens a new connection. The process binds its listen socket before CMS registration, so a registry that accepts the TCP connection and sends nothing does not delay `/health` or `/`. Postgres is not contacted until a catalog route runs. Listen port is **4026**.
 
 The container image builds with `dune build --profile release` and copies only that native binary onto a Debian runtime with `libpq` and `libgmp` (no F* compiler, no opam switch). Fly suspends idle machines (`auto_stop_machines = "suspend"`, autostart on) at 256mb and checks `GET /health`.

@@ -858,6 +858,374 @@ let gate_tests () =
         (has out "not-a-real-direct-dep")
         "SBOM gate names the opam dependency missing from the SBOM")
 
+let rec read_full fd buf off len =
+  if len > 0 then
+    let n = Unix.read fd buf off len in
+    if n = 0 then failwith "stand-in eof"
+    else read_full fd buf (off + n) (len - n)
+
+let read_i32 fd =
+  let b = Bytes.create 4 in
+  read_full fd b 0 4;
+  (Char.code (Bytes.get b 0) lsl 24)
+  lor (Char.code (Bytes.get b 1) lsl 16)
+  lor (Char.code (Bytes.get b 2) lsl 8)
+  lor Char.code (Bytes.get b 3)
+
+let add_i32 buf n =
+  Buffer.add_char buf (Char.chr ((n lsr 24) land 255));
+  Buffer.add_char buf (Char.chr ((n lsr 16) land 255));
+  Buffer.add_char buf (Char.chr ((n lsr 8) land 255));
+  Buffer.add_char buf (Char.chr (n land 255))
+
+let send_all fd s =
+  let b = Bytes.of_string s in
+  let rec loop off =
+    if off < Bytes.length b then
+      let n = Unix.write fd b off (Bytes.length b - off) in
+      if n = 0 then failwith "stand-in short write" else loop (off + n)
+  in
+  loop 0
+
+let pg_ssl = 80877103
+let pg_gss = 80877104
+let pg_proto = 196608
+
+let ready_for_query () =
+  let buf = Buffer.create 128 in
+  let add_msg tag payload =
+    Buffer.add_char buf tag;
+    add_i32 buf (4 + String.length payload);
+    Buffer.add_string buf payload
+  in
+  let auth = Buffer.create 4 in
+  add_i32 auth 0;
+  add_msg 'R' (Buffer.contents auth);
+  List.iter
+    (fun (k, v) -> add_msg 'S' (k ^ "\000" ^ v ^ "\000"))
+    [
+      ("server_version", "14.0");
+      ("client_encoding", "UTF8");
+      ("server_encoding", "UTF8");
+      ("DateStyle", "ISO, MDY");
+      ("integer_datetimes", "on");
+    ];
+  add_msg 'Z' "I";
+  Buffer.contents buf
+
+let rec read_startup fd =
+  let len = read_i32 fd in
+  if len < 8 then failwith "short startup";
+  let code = read_i32 fd in
+  let rest = len - 8 in
+  (if rest > 0 then
+     let junk = Bytes.create rest in
+     read_full fd junk 0 rest);
+  if code = pg_ssl || code = pg_gss then (
+    send_all fd "N";
+    read_startup fd)
+  else if code <> pg_proto then failwith ("startup code " ^ string_of_int code)
+
+let read_message fd =
+  let tagb = Bytes.create 1 in
+  read_full fd tagb 0 1;
+  let len = read_i32 fd in
+  if len < 4 then failwith "short message";
+  let n = len - 4 in
+  (if n > 0 then
+     let payload = Bytes.create n in
+     read_full fd payload 0 n);
+  Bytes.get tagb 0
+
+(* Local stand-in for libpq. [Stall] accepts and never answers, so the
+   catalog call blocks inside PQconnectdb. [Reset] completes startup, reads
+   one query, and closes — the cached PGconn then goes CONNECTION_BAD. *)
+type pg_mode = Stall | Reset
+
+let start_standin mode =
+  let fd = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+  Unix.setsockopt fd Unix.SO_REUSEADDR true;
+  Unix.bind fd (Unix.ADDR_INET (Unix.inet_addr_loopback, 0));
+  Unix.listen fd 16;
+  let port =
+    match Unix.getsockname fd with
+    | Unix.ADDR_INET (_, p) -> p
+    | Unix.ADDR_UNIX _ -> failwith "stand-in socket is not inet"
+  in
+  let accepts = ref 0 in
+  let held = ref [] in
+  let stop = ref false in
+  (try Unix.setsockopt_float fd Unix.SO_RCVTIMEO 0.2 with _ -> ());
+  let th =
+    Thread.create
+      (fun () ->
+        while not !stop do
+          match Unix.accept fd with
+          | exception
+              Unix.Unix_error
+                ((Unix.EAGAIN | Unix.EWOULDBLOCK | Unix.EINTR), _, _) ->
+              ()
+          | exception _ -> stop := true
+          | client, _ -> (
+              incr accepts;
+              match mode with
+              | Stall -> held := client :: !held
+              | Reset -> (
+                  (try
+                     Unix.setsockopt_float client Unix.SO_RCVTIMEO 3.0;
+                     read_startup client;
+                     send_all client (ready_for_query ());
+                     let tag = read_message client in
+                     if tag <> 'Q' then
+                       Printf.eprintf "stand-in: expected query, got %C\n%!" tag
+                   with e ->
+                     Printf.eprintf "stand-in: %s\n%!" (Printexc.to_string e));
+                  try Unix.close client with _ -> ()))
+        done)
+      ()
+  in
+  (port, accepts, held, stop, fd, th)
+
+let stop_standin held stop fd th =
+  stop := true;
+  List.iter
+    (fun c ->
+      (try Unix.shutdown c Unix.SHUTDOWN_ALL with _ -> ());
+      try Unix.close c with _ -> ())
+    !held;
+  (try Unix.close fd with _ -> ());
+  try Thread.join th with _ -> ()
+
+let rec wait_until msg pred deadline =
+  if pred () then ()
+  else if Unix.gettimeofday () >= deadline then failwith msg
+  else (
+    Thread.delay 0.01;
+    wait_until msg pred deadline)
+
+let rec connect_loopback port spins =
+  let fd = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+  try
+    Unix.connect fd (Unix.ADDR_INET (Unix.inet_addr_loopback, port));
+    fd
+  with e ->
+    (try Unix.close fd with _ -> ());
+    if spins <= 0 then raise e;
+    Thread.delay 0.01;
+    connect_loopback port (spins - 1)
+
+let rec write_bytes fd b off =
+  if off < Bytes.length b then
+    let n = Unix.write fd b off (Bytes.length b - off) in
+    if n = 0 then failwith "http short write" else write_bytes fd b (off + n)
+
+let rec read_http fd deadline acc =
+  let remain = deadline -. Unix.gettimeofday () in
+  if remain <= 0. then failwith "http client timeout"
+  else
+    match Unix.select [ fd ] [] [] remain with
+    | exception Unix.Unix_error (Unix.EINTR, _, _) -> read_http fd deadline acc
+    | [], _, _ -> failwith "http client timeout"
+    | _ -> (
+        let buf = Bytes.create 4096 in
+        match Unix.read fd buf 0 4096 with
+        | exception Unix.Unix_error (Unix.EINTR, _, _) ->
+            read_http fd deadline acc
+        | 0 -> acc
+        | n -> read_http fd deadline (acc ^ Bytes.sub_string buf 0 n))
+
+let parse_http raw =
+  let marker = "\r\n\r\n" in
+  let m = String.length marker in
+  let rec find i =
+    if i + m > String.length raw then None
+    else if String.sub raw i m = marker then Some i
+    else find (i + 1)
+  in
+  match find 0 with
+  | None -> (0, "")
+  | Some i ->
+      let head = String.sub raw 0 i in
+      let body = String.sub raw (i + m) (String.length raw - i - m) in
+      let status =
+        match String.split_on_char ' ' head with
+        | _ :: code :: _ -> ( try int_of_string code with _ -> 0)
+        | _ -> 0
+      in
+      (status, body)
+
+let http_get port path budget =
+  let fd = connect_loopback port 50 in
+  Fun.protect
+    ~finally:(fun () -> try Unix.close fd with _ -> ())
+    (fun () ->
+      let req =
+        Printf.sprintf
+          "GET %s HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" path
+      in
+      write_bytes fd (Bytes.of_string req) 0;
+      parse_http (read_http fd (Unix.gettimeofday () +. budget) ""))
+
+let is_json body =
+  let n = String.length body in
+  n >= 2 && body.[0] = '{' && body.[n - 1] = '}'
+
+let with_database url f =
+  let old = Sys.getenv_opt "DATABASE_URL" in
+  Unix.putenv "DATABASE_URL" url;
+  Catalog.disconnect ();
+  Fun.protect
+    ~finally:(fun () ->
+      (try Catalog.disconnect () with _ -> ());
+      match old with
+      | Some s -> Unix.putenv "DATABASE_URL" s
+      | None -> Unix.putenv "DATABASE_URL" "")
+    f
+
+let shipped_catalog sql args = Catalog.query sql args
+
+let listen_tests () =
+  (* Header-less peer: the shipped accept loop must still serve /health. *)
+  let before_sql = !Catalog.sql_count in
+  let before_acc = !Serve.accepted in
+  let port = Serve.start shipped_catalog in
+  let silent = connect_loopback port 50 in
+  Fun.protect
+    ~finally:(fun () -> try Unix.close silent with _ -> ())
+    (fun () ->
+      wait_until "silent client was not accepted"
+        (fun () -> !Serve.accepted > before_acc)
+        (Unix.gettimeofday () +. 2.0);
+      let t0 = Unix.gettimeofday () in
+      let status, body =
+        try http_get port "/health" 3.0 with e -> (0, Printexc.to_string e)
+      in
+      let dt = Unix.gettimeofday () -. t0 in
+      expect (status = 200) "headerless client: GET /health returns 200";
+      expect (body = health_body)
+        "headerless client: GET /health body is exactly {\"status\":\"ok\"}";
+      expect (dt < 2.0)
+        (Printf.sprintf
+           "headerless client: GET /health returned in %.3fs (bound 2s)" dt);
+      expect
+        (!Catalog.sql_count = before_sql)
+        "headerless client: GET /health does not query the catalog");
+
+  (* Catalog call blocked inside libpq must not delay /health or query it. *)
+  let pg_port, accepts, held, stop, pg_fd, pg_th = start_standin Stall in
+  Fun.protect
+    ~finally:(fun () -> stop_standin held stop pg_fd pg_th)
+    (fun () ->
+      let url =
+        Printf.sprintf
+          "postgres://postgres:postgres@127.0.0.1:%d/carolina_dev?connect_timeout=5"
+          pg_port
+      in
+      with_database url (fun () ->
+          let port = Serve.start shipped_catalog in
+          let outcome = ref None in
+          let req =
+            Thread.create
+              (fun () ->
+                outcome :=
+                  Some
+                    (try `Ok (http_get port "/v1/years" 8.0)
+                     with e -> `Exn (Printexc.to_string e)))
+              ()
+          in
+          wait_until "stalled catalog query did not reach the database"
+            (fun () -> !accepts >= 1)
+            (Unix.gettimeofday () +. 3.0);
+          let sql_at_stall = !Catalog.sql_count in
+          expect
+            (sql_at_stall > before_sql)
+            "stalled catalog query entered the catalog";
+          let t0 = Unix.gettimeofday () in
+          let status, body =
+            try http_get port "/health" 3.0 with e -> (0, Printexc.to_string e)
+          in
+          let dt = Unix.gettimeofday () -. t0 in
+          expect (status = 200) "stalled catalog: GET /health returns 200";
+          expect (body = health_body)
+            "stalled catalog: GET /health body is exactly {\"status\":\"ok\"}";
+          expect (dt < 2.0)
+            (Printf.sprintf
+               "stalled catalog: GET /health returned in %.3fs (bound 2s)" dt);
+          expect
+            (!Catalog.sql_count = sql_at_stall)
+            "stalled catalog: GET /health does not query the catalog";
+          List.iter
+            (fun c ->
+              (try Unix.shutdown c Unix.SHUTDOWN_ALL with _ -> ());
+              try Unix.close c with _ -> ())
+            !held;
+          held := [];
+          Thread.join req;
+          expect
+            (match !outcome with Some _ -> true | None -> false)
+            "stalled catalog query finished after the database stood down"));
+
+  (* A query whose connection is closed must answer HTTP JSON, then connect again. *)
+  let pg_port, accepts, held, stop, pg_fd, pg_th = start_standin Reset in
+  Fun.protect
+    ~finally:(fun () -> stop_standin held stop pg_fd pg_th)
+    (fun () ->
+      let url =
+        Printf.sprintf "postgres://postgres:postgres@127.0.0.1:%d/carolina_dev"
+          pg_port
+      in
+      with_database url (fun () ->
+          let connects0 = !Catalog.connect_count in
+          let port = Serve.start shipped_catalog in
+          let status, body =
+            try http_get port "/v1/years" 3.0
+            with e -> (0, Printexc.to_string e)
+          in
+          expect
+            (status >= 100 && status <= 599)
+            (Printf.sprintf
+               "reset database: catalog response has an HTTP status (got %d)"
+               status);
+          expect (is_json body)
+            (Printf.sprintf
+               "reset database: catalog response body is JSON (got %S)" body);
+          let connects1 = !Catalog.connect_count in
+          let accepts1 = !accepts in
+          expect (connects1 > connects0)
+            (Printf.sprintf
+               "reset database: first catalog query opened a connection (%d -> \
+                %d)"
+               connects0 connects1);
+          expect (accepts1 >= 1)
+            "reset database: stand-in accepted the first catalog query";
+          let status2, body2 =
+            try http_get port "/v1/years" 3.0
+            with e -> (0, Printexc.to_string e)
+          in
+          expect
+            (status2 >= 100 && status2 <= 599)
+            (Printf.sprintf
+               "reset database: following catalog response has an HTTP status \
+                (got %d)"
+               status2);
+          expect (is_json body2)
+            (Printf.sprintf
+               "reset database: following catalog response body is JSON (got \
+                %S)"
+               body2);
+          expect
+            (!Catalog.connect_count > connects1)
+            (Printf.sprintf
+               "reset database: next catalog query opens a new database \
+                connection (%d -> %d)"
+               connects1 !Catalog.connect_count);
+          expect (!accepts > accepts1)
+            (Printf.sprintf
+               "reset database: next catalog query does not reuse the failed \
+                connection (accepts %d -> %d)"
+               accepts1 !accepts)));
+  Printf.eprintf "listen tests passed\n%!"
+
 let () =
   expect (Carolina.language = "F*") "identity language is F*";
   expect (Carolina.framework = "OCaml Unix") "framework is OCaml Unix";
@@ -1003,6 +1371,7 @@ let () =
   Printf.eprintf "handler tests passed\n%!";
   gate_tests ();
   ci_shape_tests ();
+  listen_tests ();
 
   if !failed > 0 then (
     Printf.eprintf "tests failed (%d)\n%!" !failed;
