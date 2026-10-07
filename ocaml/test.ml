@@ -811,6 +811,23 @@ let gate_tests () =
   expect (has fly "path = \"/health\"") "Fly HTTP check is GET /health";
   expect (has fly "min_machines_running = 0") "Fly does not keep a warm machine";
 
+  let readme = read_file (Filename.concat root "README.md") in
+  expect (has readme "v2026.08.30") "README names F* v2026.08.30";
+  expect (has readme "OCaml 5.3") "README names OCaml 5.3";
+  expect (not (has readme "CRaC")) "README does not claim a JVM CRaC runtime";
+  expect
+    (Sys.file_exists (Filename.concat root "AGENTS.md"))
+    "AGENTS.md is committed";
+  expect
+    (Sys.file_exists (Filename.concat root "DECISIONS.md"))
+    "DECISIONS.md is committed";
+  expect
+    (Sys.file_exists (Filename.concat root "MEMORY.md"))
+    "MEMORY.md is committed";
+  let agents = read_file (Filename.concat root "AGENTS.md") in
+  expect (has agents "DECISIONS.md") "AGENTS.md points at DECISIONS.md";
+  expect (has agents "MEMORY.md") "AGENTS.md points at MEMORY.md";
+
   let script = Filename.concat root "scripts/check-sbom.sh" in
   let opam = Filename.concat root "carolina_fstar.opam" in
   let sbom = Filename.concat root "opam-deps.cdx.json" in

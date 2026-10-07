@@ -1,6 +1,8 @@
 # carolina-codes-fstar
 
-Read-only v1 polyglot API for Carolina Code Conference. **F\*** extracted with `--codegen OCaml`, served over **OCaml Unix** sockets.
+Read-only v1 polyglot API for Carolina Code Conference. **F\* v2026.08.30** extracted with `--codegen OCaml`, served over **OCaml 5.3** Unix sockets (no separate HTTP framework).
+
+The build uses dune, ocamlfind, batteries, zarith, yojson, ppx_deriving, ppx_deriving_yojson, and stdint. The server links libpq and libgmp (`libpq5` and `libgmp10` in the runtime image). ocamlformat 0.27.0 is optional and only checks handwritten OCaml. There is no JVM runtime.
 
 Catalog SQL uses libpq against PostgreSQL `v1_*` views. Routing lives in `src/Carolina.fst`; `Carolina.handle_get` is the shipped handler. Tests drive that extracted function with a fake catalog.
 
