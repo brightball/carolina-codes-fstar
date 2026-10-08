@@ -63,7 +63,7 @@ Year-scoped speaker rows include `languages` and `topics`. Year-scoped sponsor r
 
 `photo_path` and `logo_path` are web paths returned from the view. This repo does not ship image bytes.
 
-A catalog request whose database connection fails or is closed still finishes with an HTTP status and a JSON body (`{"error":"unavailable"}`). That handle is dropped. The next catalog request opens a new connection.
+A catalog request whose database connection fails, is closed, or never answers still finishes with an HTTP status and a JSON body (`{"error":"unavailable"}`). A silent peer is given up after 1 second. That handle is dropped. The next catalog request opens a new connection.
 
 A client that connects and never finishes its request headers cannot hold the accept loop. Header reads stop after 5 seconds.
 

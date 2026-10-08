@@ -36,8 +36,8 @@ let dsn () =
     raw ^ (if String.contains raw '?' then "&" else "?") ^ "sslmode=disable"
   else raw
 
-(* Suspend and pgbouncer leave CONNECTION_BAD handles. Drop them so the next
-   query opens a new connection instead of failing until process restart. *)
+(* Suspend and pgbouncer leave handles that still look open. Drop them so the
+   next query opens a new connection instead of waiting on the same socket. *)
 let disconnect () =
   with_lock (fun () ->
       match !live with
@@ -68,7 +68,8 @@ let query sql args : Carolina.row list =
           let c = ensure () in
           try pq_exec c sql (Array.of_list args)
           with e ->
-            if not (pq_ok c) then (
-              live := None;
-              pq_finish c);
+            (* A timed-out peer can still report CONNECTION_OK. Always drop
+               the handle so the next query cannot sit on it again. *)
+            live := None;
+            (try pq_finish c with _ -> ());
             raise e)

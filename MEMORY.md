@@ -13,6 +13,7 @@ Short index of facts that stay true across sessions. Read `DECISIONS.md` before 
 
 - Build: dune, ocamlfind, batteries, zarith, yojson, ppx_deriving, ppx_deriving_yojson, stdint.
 - Runtime links: libpq and libgmp (`libpq5`, `libgmp10` in the image).
+- libpq connect and query give up after 1 second when the peer is silent. The client receives `{"error":"unavailable"}` and the handle is dropped.
 - No JVM runtime and no CRaC.
 
 ## Ports

@@ -67,3 +67,11 @@ Status: accepted
 Decision: `make release` is `dune build --profile release`. The runtime image copies only `server.exe` onto Debian with `libpq5` and `libgmp10`. It does not contain the F* compiler or an opam switch. Fly suspends idle machines (`auto_stop_machines = "suspend"`, autostart, `min_machines_running = 0`, 256mb) and checks `GET /health`.
 
 Consequence: Do not keep a warm machine, raise memory, or turn off suspend to paper over a blocked accept loop or a cached dead connection. Do not copy the opam switch or the F* tarball into the runtime stage.
+
+## D9. Bound a silent database at 1 second
+
+Status: accepted
+
+Decision: `ocaml/pq_stubs.c` polls libpq connect and query sockets and gives up after 1 second when the peer does not answer. The runtime lock is released during that wait. On any catalog error the handle is finished, including when `PQstatus` is still `CONNECTION_OK`, and the client receives `{"error":"unavailable"}`.
+
+Consequence: A peer that accepts and stays silent, or a connection that stops answering after startup, must not hold a catalog request until the kernel times out TCP. Do not raise this deadline past the point where that response would miss a 2 second bound. Do not reuse the handle after the deadline.

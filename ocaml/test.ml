@@ -954,10 +954,10 @@ let read_message fd =
      read_full fd payload 0 n);
   Bytes.get tagb 0
 
-(* Local stand-in for libpq. [Stall] accepts and never answers, so the
-   catalog call blocks inside PQconnectdb. [Reset] completes startup, reads
-   one query, and closes — the cached PGconn then goes CONNECTION_BAD. *)
-type pg_mode = Stall | Reset
+(* Local stand-in for libpq. [Stall] accepts and never answers, so startup
+   never completes. [QueryStall] finishes startup, reads one query, and then
+   never answers. [Reset] completes startup, reads one query, and closes. *)
+type pg_mode = Stall | QueryStall | Reset
 
 let start_standin mode =
   let fd = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
@@ -987,6 +987,21 @@ let start_standin mode =
               incr accepts;
               match mode with
               | Stall -> held := client :: !held
+              | QueryStall ->
+                  ignore
+                    (Thread.create
+                       (fun () ->
+                         try
+                           Unix.setsockopt_float client Unix.SO_RCVTIMEO 3.0;
+                           read_startup client;
+                           send_all client (ready_for_query ());
+                           ignore (read_message client);
+                           held := client :: !held;
+                           while not !stop do
+                             Thread.delay 0.05
+                           done
+                         with _ -> ( try Unix.close client with _ -> ()))
+                       ())
               | Reset -> (
                   (try
                      Unix.setsockopt_float client Unix.SO_RCVTIMEO 3.0;
@@ -1141,12 +1156,13 @@ let listen_tests () =
       with_database url (fun () ->
           let port = Serve.start shipped_catalog in
           let outcome = ref None in
+          let t_req = Unix.gettimeofday () in
           let req =
             Thread.create
               (fun () ->
                 outcome :=
                   Some
-                    (try `Ok (http_get port "/v1/years" 8.0)
+                    (try `Ok (http_get port "/v1/years" 3.0)
                      with e -> `Exn (Printexc.to_string e)))
               ()
           in
@@ -1157,6 +1173,8 @@ let listen_tests () =
           expect
             (sql_at_stall > before_sql)
             "stalled catalog query entered the catalog";
+          expect (!outcome = None)
+            "stalled catalog: request still in progress during health";
           let t0 = Unix.gettimeofday () in
           let status, body =
             try http_get port "/health" 3.0 with e -> (0, Printexc.to_string e)
@@ -1171,16 +1189,118 @@ let listen_tests () =
           expect
             (!Catalog.sql_count = sql_at_stall)
             "stalled catalog: GET /health does not query the catalog";
-          List.iter
-            (fun c ->
-              (try Unix.shutdown c Unix.SHUTDOWN_ALL with _ -> ());
-              try Unix.close c with _ -> ())
-            !held;
-          held := [];
           Thread.join req;
+          let req_dt = Unix.gettimeofday () -. t_req in
+          match !outcome with
+          | Some (`Ok (st, resp)) ->
+              expect
+                (st >= 100 && st <= 599)
+                (Printf.sprintf
+                   "stalled catalog: catalog response has an HTTP status (got \
+                    %d)"
+                   st);
+              expect (is_json resp)
+                (Printf.sprintf
+                   "stalled catalog: catalog response body is JSON (got %S)"
+                   resp);
+              expect (req_dt < 2.0)
+                (Printf.sprintf
+                   "stalled catalog: catalog JSON returned in %.3fs (bound 2s)"
+                   req_dt)
+          | Some (`Exn msg) ->
+              expect false
+                (Printf.sprintf "stalled catalog: catalog request failed: %s"
+                   msg)
+          | None ->
+              expect false "stalled catalog: catalog request did not finish"));
+
+  (* Startup succeeds, then the peer never answers the query. The catalog
+     request must still finish with JSON, and /health must stay fast while
+     that wait is in progress. *)
+  let pg_port, accepts, held, stop, pg_fd, pg_th = start_standin QueryStall in
+  Fun.protect
+    ~finally:(fun () -> stop_standin held stop pg_fd pg_th)
+    (fun () ->
+      let url =
+        Printf.sprintf "postgres://postgres:postgres@127.0.0.1:%d/carolina_dev"
+          pg_port
+      in
+      with_database url (fun () ->
+          let port = Serve.start shipped_catalog in
+          let outcome = ref None in
+          let t_req = Unix.gettimeofday () in
+          let req =
+            Thread.create
+              (fun () ->
+                outcome :=
+                  Some
+                    (try `Ok (http_get port "/v1/years" 3.0)
+                     with e -> `Exn (Printexc.to_string e)))
+              ()
+          in
+          wait_until "silent query did not reach the database"
+            (fun () -> !accepts >= 1)
+            (Unix.gettimeofday () +. 3.0);
+          expect (!outcome = None)
+            "silent query: request still in progress during health";
+          let t0 = Unix.gettimeofday () in
+          let status, body =
+            try http_get port "/health" 3.0 with e -> (0, Printexc.to_string e)
+          in
+          let dt = Unix.gettimeofday () -. t0 in
+          expect (status = 200) "silent query: GET /health returns 200";
+          expect (body = health_body)
+            "silent query: GET /health body is exactly {\"status\":\"ok\"}";
+          expect (dt < 2.0)
+            (Printf.sprintf
+               "silent query: GET /health returned in %.3fs (bound 2s)" dt);
+          Thread.join req;
+          let req_dt = Unix.gettimeofday () -. t_req in
+          (match !outcome with
+          | Some (`Ok (st, resp)) ->
+              expect
+                (st >= 100 && st <= 599)
+                (Printf.sprintf
+                   "silent query: catalog response has an HTTP status (got %d)"
+                   st);
+              expect (is_json resp)
+                (Printf.sprintf
+                   "silent query: catalog response body is JSON (got %S)" resp);
+              expect (req_dt < 2.0)
+                (Printf.sprintf
+                   "silent query: catalog JSON returned in %.3fs (bound 2s)"
+                   req_dt)
+          | Some (`Exn msg) ->
+              expect false
+                (Printf.sprintf "silent query: catalog request failed: %s" msg)
+          | None -> expect false "silent query: catalog request did not finish");
+          let connects_after = !Catalog.connect_count in
+          let accepts_after = !accepts in
+          let st2, body2 =
+            try http_get port "/v1/years" 3.0
+            with e -> (0, Printexc.to_string e)
+          in
           expect
-            (match !outcome with Some _ -> true | None -> false)
-            "stalled catalog query finished after the database stood down"));
+            (st2 >= 100 && st2 <= 599)
+            (Printf.sprintf
+               "silent query: following catalog response has an HTTP status \
+                (got %d)"
+               st2);
+          expect (is_json body2)
+            (Printf.sprintf
+               "silent query: following catalog response body is JSON (got %S)"
+               body2);
+          expect
+            (!Catalog.connect_count > connects_after)
+            (Printf.sprintf
+               "silent query: next catalog query opens a new database \
+                connection (%d -> %d)"
+               connects_after !Catalog.connect_count);
+          expect (!accepts > accepts_after)
+            (Printf.sprintf
+               "silent query: next catalog query does not reuse the silent \
+                connection (accepts %d -> %d)"
+               accepts_after !accepts)));
 
   (* A query whose connection is closed must answer HTTP JSON, then connect again. *)
   let pg_port, accepts, held, stop, pg_fd, pg_th = start_standin Reset in
